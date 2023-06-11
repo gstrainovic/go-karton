@@ -1,23 +1,32 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"strconv"
 	"strings"
+	// "time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly"
+	"github.com/gocolly/colly/debug"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 func getData(links []string) []Item {
 	var returnArray []Item
 
-	collector := colly.NewCollector()
+    collector := colly.NewCollector(
+        colly.Async(true),
+        colly.Debugger(&debug.LogDebugger{}),
+    )
+    collector.Limit(&colly.LimitRule{
+        Parallelism: 100,
+        // RandomDelay: 1 * time.Second,
+    })
+
 	collector.OnHTML("h1", func(e *colly.HTMLElement) {
 		title := e.Text
-		fmt.Println("Read: ", title)
+		// fmt.Println("Read: ", title)
 
 		valuesArray := []Value{}
 
@@ -68,6 +77,7 @@ func getData(links []string) []Item {
 		if err != nil {
 			panic(err)
 		}
+		collector.Wait()
 	}
 
 	return returnArray
