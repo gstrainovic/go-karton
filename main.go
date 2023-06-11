@@ -7,21 +7,30 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"context"
 
 	"github.com/BurntSushi/toml"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly"
-	"golang.org/x/oauth2/google"
-	"google.golang.org/api/sheets/v4"
+	"github.com/tealeg/xlsx"
+	_ "github.com/mattn/go-sqlite3"
 )
 
-func main() {
-	type Config struct {
-		URL    string
-		Domain string
-	}
+type Config struct {
+	URL    string
+	Domain string
+}
 
+type Item struct {
+	Title  string
+	Values []Value
+}
+
+type Value struct {
+	LinkText int
+	Value    float64
+}
+
+func main() {
 	b, err := os.ReadFile("./config.toml")
 	if err != nil {
 		panic(err)
@@ -36,21 +45,19 @@ func main() {
 	fmt.Println(conf.URL)
 
 	var links []string
-	var returnArray []map[string]interface{}
-	var linkTextList []float64
+	var returnArray []Item
 
 	rootCollector := colly.NewCollector()
 
 	rootCollector.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 
-		// the link must be a link without domain and containx a 'x'
+		// the link must be a link without a domain and contain 'x'
 		if strings.Contains(link, "x") && !strings.Contains(link, "http") {
-			fullPathUrl := conf.Domain + link
-			links = append(links, fullPathUrl)
-			fmt.Printf("Link found: %s\n", fullPathUrl)
+			fullPathURL := conf.Domain + link
+			links = append(links, fullPathURL)
+			fmt.Printf("Link found: %s\n", fullPathURL)
 		}
-
 	})
 
 	err = rootCollector.Visit("https://www.karton.eu/Unsere-Kartonagen/")
@@ -63,7 +70,7 @@ func main() {
 		title := e.Text
 		fmt.Println("Title:", title)
 
-		valuesArray := []map[string]interface{}{}
+		valuesArray := []Value{}
 
 		tableRows := e.DOM.ParentsUntil("~").Find("table tr")
 
@@ -89,16 +96,16 @@ func main() {
 				return
 			}
 
-			valuesArray = append(valuesArray, map[string]interface{}{
-				"linkText": linkTextNumber,
-				"value":    valueFloat,
+			valuesArray = append(valuesArray, Value{
+				LinkText: linkTextNumber,
+				Value:    valueFloat,
 			})
 		})
 
 		if len(valuesArray) > 0 && title != "" {
-			returnArray = append(returnArray, map[string]interface{}{
-				"title":  title,
-				"values": valuesArray,
+			returnArray = append(returnArray, Item{
+				Title:  title,
+				Values: valuesArray,
 			})
 		}
 	})
@@ -107,8 +114,9 @@ func main() {
 		log.Println("Request URL:", r.Request.URL, "failed with response:", r, "\nError:", err)
 	})
 
-	// err = c.Visit(conf.URL)
-	// visit all links
+	// For debugging only the first 10 links
+	links = links[:10]
+
 	for _, link := range links {
 		err = linkCollector.Visit(link)
 		if err != nil {
@@ -116,101 +124,60 @@ func main() {
 		}
 	}
 
+	// Create a new Excel file
+	file := xlsx.NewFile()
+	sheet, err := file.AddSheet("Sheet1")
+	if err != nil {
+		log.Fatal("Error creating sheet:", err)
+	}
+
+	// Add the header row
+	headerRow := sheet.AddRow()
+	headerRow.AddCell().SetValue("Title")
+	linkTexts := getSortedLinkTexts(returnArray)
+	for _, linkText := range linkTexts {
+		headerRow.AddCell().SetValue(strconv.Itoa(linkText))
+	}
+
+	// Add data rows
 	for _, item := range returnArray {
-		for _, value := range item["values"].([]map[string]interface{}) {
-			linkText := value["linkText"].(float64)
-			linkTextList = append(linkTextList, linkText)
+		dataRow := sheet.AddRow()
+		dataRow.AddCell().SetValue(item.Title)
+
+		// Initialize the values map
+		valuesMap := make(map[int]float64)
+		for _, value := range item.Values {
+			valuesMap[value.LinkText] = value.Value
+		}
+
+		for _, linkText := range linkTexts {
+			dataRow.AddCell().SetValue(strconv.FormatFloat(valuesMap[linkText], 'f', 2, 64))
 		}
 	}
 
-	sort.Float64s(linkTextList)
-
-	// make sure you've exported GOOGLE_APPLICATION_CREDENTIALS="path/to/your/credentials.json"
-	credentials, err := google.FindDefaultCredentials(nil, "https://www.googleapis.com/auth/spreadsheets")
+	// Save the Excel file
+	err = file.Save("data.xlsx")
 	if err != nil {
-		log.Fatal("Error finding Google Sheets credentials:", err)
+		log.Fatal("Error saving Excel file:", err)
 	}
 
-	if credentials == nil {
-		log.Fatal("No Google Sheets credentials found")
-	}
+	fmt.Println("Data successfully saved to data.xlsx.")
+}
 
-
-	ctx := context.Background()
-	client, err := google.DefaultClient(ctx, sheets.SpreadsheetsScope)
-	if err != nil {
-		log.Fatal("Error creating Google Sheets client:", err)
-	}
-
-	sheetsService, err := sheets.New(client)
-	if err != nil {
-		log.Fatal("Error creating Google Sheets service:", err)
-	}
-
-
-	spreadsheetID := "YOUR_SPREADSHEET_ID"
-	sheetName := "output"
-
-	// Create a new sheet named output, if it doesn't exist
-	sheetExists := false
-	spreadsheet, err := sheetsService.Spreadsheets.Get(spreadsheetID).Do()
-	if err != nil {
-		log.Println("Error retrieving spreadsheet:", err)
-	} else {
-		for _, sheet := range spreadsheet.Sheets {
-			if sheet.Properties.Title == sheetName {
-				sheetExists = true
-				break
-			}
+// Helper function to get sorted link texts from the returnArray
+func getSortedLinkTexts(items []Item) []int {
+	linkTexts := make(map[int]bool)
+	for _, item := range items {
+		for _, value := range item.Values {
+			linkTexts[value.LinkText] = true
 		}
 	}
 
-	if !sheetExists {
-		addSheetRequest := &sheets.Request{
-			AddSheet: &sheets.AddSheetRequest{
-				Properties: &sheets.SheetProperties{
-					Title: sheetName,
-				},
-			},
-		}
-
-		batchUpdateRequest := &sheets.BatchUpdateSpreadsheetRequest{
-			Requests: []*sheets.Request{addSheetRequest},
-		}
-
-		_, err = sheetsService.Spreadsheets.BatchUpdate(spreadsheetID, batchUpdateRequest).Do()
-		if err != nil {
-			log.Println("Error creating new sheet:", err)
-		}
+	var sortedLinkTexts []int
+	for linkText := range linkTexts {
+		sortedLinkTexts = append(sortedLinkTexts, linkText)
 	}
 
-	// Clear the sheet
-	clearValuesRequest := &sheets.ClearValuesRequest{}
-	_, err = sheetsService.Spreadsheets.Values.Clear(spreadsheetID, sheetName, clearValuesRequest).Do()
-	if err != nil {
-		log.Println("Error clearing sheet:", err)
-	}
-
-	// Write the data to the sheet
-	var rows [][]interface{}
-	headers := make([]interface{}, 0)
-	headers = append(headers, "Title")
-	for _, linkText := range linkTextList {
-		headers = append(headers, interface{}(linkText))
-	}
-
-	// Append headers to rows
-	rows = append(rows, headers)
-
-	valueRange := &sheets.ValueRange{
-		Values: rows,
-	}
-
-	_, err = sheetsService.Spreadsheets.Values.Append(spreadsheetID, sheetName, valueRange).ValueInputOption("USER_ENTERED").Do()
-	if err != nil {
-		log.Println("Error appending values to sheet:", err)
-	}
-
-	fmt.Println(returnArray)
-	fmt.Println(linkTextList)
+	sort.Ints(sortedLinkTexts)
+	return sortedLinkTexts
 }
