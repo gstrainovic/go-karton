@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	// "net/http"
 	"strconv"
 	"strings"
 	// "time"
@@ -15,22 +16,31 @@ import (
 func getData(links []string) []Item {
 	var returnArray []Item
 
-    collector := colly.NewCollector(
-        colly.Async(true),
-        colly.Debugger(&debug.LogDebugger{}),
-    )
-    collector.Limit(&colly.LimitRule{
-        Parallelism: 100,
-        // RandomDelay: 1 * time.Second,
-    })
+	// Create a custom HTTP client with an increased timeout duration
+	// client := &http.Client{
+	// 	Timeout: 30 * time.Second, // Set a timeout of 30 seconds
+	// }
+
+	collector := colly.NewCollector(
+		colly.Async(true),
+		colly.Debugger(&debug.LogDebugger{}),
+		// colly.WithHTTPClient(client), // Use the custom HTTP client
+	)
+	collector.Limit(&colly.LimitRule{
+		Parallelism: len(links),
+	})
 
 	collector.OnHTML("h1", func(e *colly.HTMLElement) {
 		title := e.Text
-		// fmt.Println("Read: ", title)
-
-		valuesArray := []Value{}
 
 		tableRows := e.DOM.ParentsUntil("~").Find("table tr")
+		numRows := tableRows.Length()
+
+		if numRows == 0 || title == "" {
+			return
+		}
+
+		valuesArray := make([]Value, 0, numRows) // Allocate capacity based on the number of rows
 
 		tableRows.Each(func(index int, element *goquery.Selection) {
 			columns := element.Find("td")
@@ -60,12 +70,10 @@ func getData(links []string) []Item {
 			})
 		})
 
-		if len(valuesArray) > 0 && title != "" {
-			returnArray = append(returnArray, Item{
-				Title:  title,
-				Values: valuesArray,
-			})
-		}
+		returnArray = append(returnArray, Item{
+			Title:  title,
+			Values: valuesArray,
+		})
 	})
 
 	collector.OnError(func(r *colly.Response, err error) {
@@ -77,8 +85,9 @@ func getData(links []string) []Item {
 		if err != nil {
 			panic(err)
 		}
-		collector.Wait()
 	}
+
+	collector.Wait()
 
 	return returnArray
 }
